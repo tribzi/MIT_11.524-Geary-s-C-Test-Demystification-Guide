@@ -1,0 +1,116 @@
+---
+title: "Geary's C Test: Demystification Guide Code"
+author: "Bahij Chancey"
+date: "5/16/2021"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+# Overview
+
+This vignette is paired with the **[Geary C Test Demystification Guide](https://docs.google.com/presentation/d/1V-IIDSwBzUpN3tIQwWYjDOdFUiTjqLbkhDIYiRueJkM/edit?usp=sharing)** by Bahij Chancey, written for MIT course 11.524.
+
+
+## Setup Environment
+
+```{r setup}
+library(knitr)
+library(tidyr)
+library(dplyr)
+library(tidycensus)
+library(sf)
+library(spdep)
+library(data.table)
+
+census_api_key("YOUR KEY HERE")
+```
+
+
+## Import Data
+
+```{r}
+counties <- c("Richmond","New York","Bronx","Kings","Queens")
+vars <- c("B02001_003", # Race: Black Alone
+          "B01003_001") # Total Population
+
+nyc_tracts <- get_acs(geography="tract", 
+                       variables = vars,  
+                       state="NY", 
+                       county=counties,
+                       year=2019, 
+                       survey='acs5',
+                       geometry=TRUE)
+
+head(nyc_tracts) %>% kable()
+```
+
+## Clean Data
+
+```{r}
+# Get the tract geometries
+tracts.geo <- nyc_tracts %>%
+                select(GEOID, geometry) %>%
+                unique()
+
+# Get variable estimates in non-spatial table
+nyc_tracts.x <- nyc_tracts %>%
+                st_set_geometry(NULL) %>%
+                select(-moe, -NAME) %>%
+                as_tibble()
+                
+# Pivot variables estimates into wide table                
+tracts.wide <- tidyr::pivot_wider(nyc_tracts.x,
+                      id_col = GEOID, 
+                      names_from = variable, 
+                      values_from = estimate,
+                      names_sep = ".") %>%
+          select(GEOID,
+                 tot.pop = B01003_001,
+                 black.pop = B02001_003)
+
+# Rejoin variables to geometries
+tracts <- left_join(tracts.geo, tracts.wide, by="GEOID") %>%
+            mutate(black.pcnt = round(black.pop/tot.pop*100,2))
+rm(tracts.geo, tracts.wide, nyc_tracts.x)
+
+# Remove empty tracts
+tracts <- tracts[!st_is_empty(tracts),]
+tracts$black.pcnt[is.na(tracts$black.pcnt)] <- 0
+
+# Remove tract without neighbors
+tracts <- tracts[-706,]
+
+head(tracts) %>% kable()
+```
+
+
+## Test for Spatial Autocorrelation
+
+```{r}
+neighborhood <- poly2nb(tracts, queen=TRUE)
+
+listw.b <- nb2listw(
+  neighbours = neighborhood, 
+  style='B')
+
+geary <- geary.test(x = tracts$black.pcnt, 
+                    listw = listw.b)
+
+print(geary)
+```
+
+
+## Check Significane
+
+```{r}
+# Run Monte Carlo Simulation, nsim = 10,000
+gp <- geary.mc(x = tracts$black.pcnt,
+         listw = listw.b,
+         nsim = 10000)
+
+# plot Monte Carlo results & C = 0.14 line
+hist(gp$res, breaks=100, 
+      main="Monte Carlo Simulation, nsim = 10,000")
+abline(v=gp['statistic'], col='red', lwd=2)
+```
